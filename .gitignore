@@ -1,0 +1,17 @@
+# 测试浏览器 profile（约 225MB，含登录态，绝不入库）
+.chrome-test/
+
+# 第三方参考脚本（别人的项目，仅本地参考用）
+ref/
+
+# 运行 / 调试产物
+*.log
+chrome-probe.txt
+cdp-list.json
+
+# WorkBuddy 工作区数据（工具托管，不属于源码）
+.workbuddy/
+
+# 系统杂物
+Thumbs.db
+desktop.ini
