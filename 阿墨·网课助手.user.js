@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         阿墨·网课助手
 // @namespace    amo.netcourse
-// @version      0.3.3
+// @version      0.3.4
 // @author       阿墨
 // @description  🖋 阿墨·网课助手 —— 全平台网课学习辅助。1、已适配超星学习通、知到智慧树（含新版 AI 课程知识学习页）、Unipus，更多平台持续适配中；2、视频自动播放 / 静音 / 倍速，任务点自动跳转；3、随堂练习、测验、作业自动答题，答案由 DeepSeek V4.1（deepseek-flash）生成；4、仅供学习交流使用，不收集手机号、学校信息等隐私内容。
 // @license      MIT
@@ -6298,10 +6298,14 @@
   const zsAiCardFinished = (card) => {
     if (!card) return false;
     const raw = zsAiPlain(card.textContent);
+    // 完成态优先以平台自己的标记为准
     if (/已完成|已学完|学习完成|已提交/.test(raw)) return true;
-    // 注意：这里必须用保留空格的原文本。真实卡片是 "世界的物质统一性 00:05:27 0%"，
-    // 一旦先压缩空白会变成 "...270%"，正则会读成 270% 而把未完成的视频误判为已完成。
-    const percentMatch = raw.match(/(\d+)\s*%\s*$/);
+    // ⚠️ 这里是第三次踩同一个坑，必须写清楚：
+    // 视频卡片文本是 "课程视频…mp4 00:12:31 8%"，zsAiPlain 会把它变成
+    // "…00:12:318%" —— 时长的最后两位和进度百分数粘连，正则会读成 318%，
+    // 于是 8% 的视频被误判为已完成 → 脚本一路跳转、永远不播视频。
+    // 所以百分比必须以「空白或行首」为边界来取，绝不能贴着前面的数字。
+    const percentMatch = raw.match(/(?:^|\s)(\d{1,3})\s*%\s*$/);
     if (percentMatch && Number(percentMatch[1]) >= 100) return true;
     const bar = card.querySelector('[class*="progress"] [style*="width"], [class*="bar"] [style*="width"]');
     if (bar) {
@@ -6311,6 +6315,8 @@
     }
     return false;
   };
+  const zsAiCardKey = (card) => zsAiCompact(card && card.textContent).slice(0, 40);
+  const zsAiCardIsActive = (card) => /(^|\s)active(\s|$)/.test(String((card && card.className) || ""));
   // 视频类资源卡片的特征：文本里带时长（如 "课程视频…mp4 00:14:43 0%"）。
   // ⚠️ 不能用 .video-wrap/.video-image 这类结构特征 —— 真机上 PPT/图文卡片的 DOM
   // 里同样有这层包裹，用了会把所有资源都当成视频。
@@ -6842,8 +6848,6 @@
     // 视频已经播完的资源（卡片文本可能还没变成 100%，避免被反复当成未完成）
     let videoDoneKey = "";
     const skippedResources = /* @__PURE__ */ new Set();
-    const zsAiCardKey = (card) => zsAiCompact(card && card.textContent).slice(0, 40);
-    const zsAiCardIsActive = (card) => /(^|\s)active(\s|$)/.test(String((card && card.className) || ""));
     const studyCurrentResource = (card) => {
       const key = zsAiPlain(card.textContent).slice(0, 40);
       if (resourceWait.key !== key) {
