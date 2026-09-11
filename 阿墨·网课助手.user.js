@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         阿墨·网课助手
 // @namespace    amo.netcourse
-// @version      0.3.1
+// @version      0.3.2
 // @author       阿墨
 // @description  🖋 阿墨·网课助手 —— 全平台网课学习辅助。1、已适配超星学习通、知到智慧树（含新版 AI 课程知识学习页）、Unipus，更多平台持续适配中；2、视频自动播放 / 静音 / 倍速，任务点自动跳转；3、随堂练习、测验、作业自动答题，答案由 DeepSeek V4.1（deepseek-flash）生成；4、仅供学习交流使用，不收集手机号、学校信息等隐私内容。
 // @license      MIT
@@ -6352,13 +6352,29 @@
     if (!required) return false;
     return required.total > 0 && required.done >= required.total;
   };
+  const zsAiOverflowY = (node) => {
+    try {
+      const style = window.getComputedStyle(node);
+      return String((style && style.overflowY) || "");
+    } catch (error) {
+      return "";
+    }
+  };
+  // 必须校验 overflow 真的是 auto/scroll。
+  // 只比较 scrollHeight 会把「页面外层容器」也当成滚动区，而它根本不能滚：
+  // scrollTop 永远是 0 → 每 2 秒重复滚一次 → 页面看起来像一直在刷新。
+  const zsAiIsScrollable = (node) => {
+    if (!node || node.scrollHeight <= node.clientHeight + 20) return false;
+    const overflowY = zsAiOverflowY(node);
+    return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+  };
   const zsAiFindScrollable = () => {
     const selectors = [
-      ".learn-page-main",
       ".resources-detail-container",
       ".resources-detail-card",
-      ".ai-assistant-main-content-left",
-      ".scroll-box"
+      ".scroll-box",
+      ".learn-page-main",
+      ".ai-assistant-main-content-left"
     ];
     let best = null;
     for (const selector of selectors) {
@@ -6369,11 +6385,36 @@
         nodes = [];
       }
       for (const node of nodes) {
-        if (node.scrollHeight <= node.clientHeight + 40) continue;
+        if (!zsAiIsScrollable(node)) continue;
         if (!best || node.scrollHeight > best.scrollHeight) best = node;
       }
     }
     return best;
+  };
+  // 文档类资源可能渲染在同源 iframe 里，顺手一起滚
+  const zsAiScrollIframes = () => {
+    let moved = 0;
+    try {
+      Array.from(document.querySelectorAll("iframe")).forEach((frame) => {
+        try {
+          const doc = frame.contentDocument;
+          if (!doc) return;
+          const el = doc.scrollingElement || doc.documentElement;
+          if (!el) return;
+          const step = Math.max(240, Math.round((frame.clientHeight || 600) * 0.8));
+          const next = Math.min(el.scrollHeight, (el.scrollTop || 0) + step);
+          if (next > (el.scrollTop || 0) + 10) {
+            el.scrollTop = next;
+            moved += 1;
+          }
+        } catch (error) {
+          /* 跨域 iframe 读不到，忽略 */
+        }
+      });
+    } catch (error) {
+      /* ignore */
+    }
+    return moved;
   };
   const ZS_AI_JUDGE_TRUE = /^(a)?(正确|是|对|√|t|true|right)$/;
   const ZS_AI_JUDGE_FALSE = /^(b)?(错误|否|错|×|x|f|false|wrong)$/;
@@ -6761,7 +6802,11 @@
     };
 
     /* ---------- 学习页 /learnPage：学完当前资源再切下一个 ---------- */
-    const resourceWait = { key: "", at: 0 };
+    const ZS_AI_MAX_SCROLL_STEPS = 400;
+    // 点同一条资源要冷却：点了没反应还反复点，内容区会不停重载，看起来就像页面一直在刷新
+    const ZS_AI_RESOURCE_CLICK_COOLDOWN_MS = 12000;
+    const resourceWait = { key: "", at: 0, steps: 0, stuck: 0 };
+    const clickAttempt = { key: "", at: 0, times: 0 };
     const skippedResources = /* @__PURE__ */ new Set();
     const zsAiCardKey = (card) => zsAiCompact(card && card.textContent).slice(0, 40);
     const zsAiCardIsActive = (card) => /(^|\s)active(\s|$)/.test(String((card && card.className) || ""));
@@ -6770,6 +6815,8 @@
       if (resourceWait.key !== key) {
         resourceWait.key = key;
         resourceWait.at = Date.now();
+        resourceWait.steps = 0;
+        resourceWait.stuck = 0;
       }
       const video = zsAiGetVideo();
       if (video) {
@@ -6802,15 +6849,30 @@
         }
         return;
       }
-      // 图文类资源没有 video，用「滚动到底 + 停留」推进
-      const scroller = zsAiFindScrollable();
-      if (scroller) {
-        const step = Math.max(240, Math.round(scroller.clientHeight * 0.85));
-        const next = Math.min(scroller.scrollHeight, scroller.scrollTop + step);
-        if (next > scroller.scrollTop + 10) {
-          scroller.scrollTop = next;
+      // 图文 / 文档类资源没有 video，用「滚动 + 停留」推进（平台按阅读时长结算）
+      const docScroller = _unsafeWindow.document.scrollingElement || _unsafeWindow.document.documentElement;
+      const scroller = zsAiFindScrollable() || docScroller;
+      if (scroller && resourceWait.steps < ZS_AI_MAX_SCROLL_STEPS) {
+        const viewHeight = zsAiIsScrollable(scroller) ? scroller.clientHeight : (_unsafeWindow.innerHeight || 800);
+        const step = Math.max(240, Math.round(viewHeight * 0.8));
+        const currentTop = Number(scroller.scrollTop) || 0;
+        const next = Math.min(scroller.scrollHeight, currentTop + step);
+        if (next > currentTop + 10) {
+          resourceWait.steps += 1;
+          try {
+            if (scroller === docScroller) _unsafeWindow.scrollTo(0, next);
+            else scroller.scrollTop = next;
+          } catch (error) {
+            /* ignore */
+          }
+          // 校验到底滚没滚：滚不动就不要一直空转，否则每 2 秒白跑一次
+          if ((Number(scroller.scrollTop) || 0) <= currentTop) {
+            resourceWait.stuck += 1;
+            if (resourceWait.stuck > 3) resourceWait.steps = ZS_AI_MAX_SCROLL_STEPS;
+          }
           return;
         }
+        zsAiScrollIframes();
       }
       const waited = Math.round((Date.now() - resourceWait.at) / 1000);
       const limit = graphicLimitSeconds();
@@ -6835,6 +6897,21 @@
       // 关键：排除当前这张卡，否则图文超时后会一直点回自己，原地死循环
       const target = candidates.find((card) => card !== activeCard);
       if (target) {
+        const targetKey = zsAiCardKey(target);
+        const now = Date.now();
+        if (clickAttempt.key === targetKey && now - clickAttempt.at < ZS_AI_RESOURCE_CLICK_COOLDOWN_MS) {
+          clickAttempt.times += 1;
+          if (clickAttempt.times >= 3) {
+            skippedResources.add(targetKey);
+            logStore.addLog(`资源「${zsAiPlain(target.textContent).slice(0, 20)}」点了没反应，先跳过它`, "warning");
+          }
+          return false;
+        }
+        if (clickAttempt.key !== targetKey) {
+          clickAttempt.key = targetKey;
+          clickAttempt.times = 0;
+        }
+        clickAttempt.at = now;
         const name = zsAiPlain(target.textContent).slice(0, 30);
         zsAiFireClick(zsAiClickable(target));
         logStore.addLog(`切换到下一个资源：${name || "未命名资源"}`, "primary");

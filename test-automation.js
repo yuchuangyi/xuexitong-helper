@@ -177,7 +177,8 @@ async function boot(pageHtml, url) {
   vm.runInContext(prelude, ctx);
   vm.runInContext(
     baseClass + '\n' + zsAiBlock +
-    '\nglobalThis.__start = () => useZhsAiCourseLogic();',
+    '\nglobalThis.__start = () => useZhsAiCourseLogic();' +
+    '\nglobalThis.__api = { zsAiFindScrollable, zsAiIsScrollable };',
     ctx,
     { filename: 'zsai-extract.js' }
   );
@@ -359,6 +360,53 @@ function lastLogs(ctx, count) {
     await start(ctx, window);
     check('I 非目标路由时待机', /待机中/.test(lastLogs(ctx, 4)), lastLogs(ctx, 4));
     check('I 非目标路由不点击', Object.keys(window.__clicks).length === 0);
+    window.close();
+  }
+
+  // J. 滚动容器必须真的能滚（overflow 校验）——这是文档任务点「一直刷新」的根因
+  {
+    const { window, ctx } = await boot(`
+      <div class="learn-page-main" style="overflow: visible" id="wrapper">页面外层容器（overflow 是 visible，根本不能滚）</div>
+      <div class="resources-detail-container" style="overflow-y: auto" id="real">真正的滚动区</div>`, LEARN_URL);
+    const wrapper = window.document.getElementById('wrapper');
+    const real = window.document.getElementById('real');
+    // jsdom 没有布局引擎，手动给出尺寸
+    [wrapper, real].forEach((el) => {
+      Object.defineProperty(el, 'scrollHeight', { value: 9000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 800, configurable: true });
+    });
+    const api = vm.runInContext('__api', ctx);
+    const wrapperScrollable = api.zsAiIsScrollable(wrapper);
+    const realScrollable = api.zsAiIsScrollable(real);
+    const chosen = api.zsAiFindScrollable();
+    check('J 外层容器（overflow:visible）不算可滚动', wrapperScrollable === false, 'wrapperScrollable=' + wrapperScrollable);
+    check('J overflow-y:auto 的容器能被识别', realScrollable === true, 'realScrollable=' + realScrollable);
+    check('J 找到的是真正的滚动区而不是页面外层',
+      chosen && chosen.id === 'real', 'chosen=' + (chosen ? chosen.id : 'null'));
+    window.close();
+  }
+
+  // K. 滚动真的发生时要有步数上限，不会无限滚
+  {
+    const { window, ctx } = await boot(`
+      ${STUDY_POINTS([{ name: '甲知识点', done: 0, total: 2, active: true }])}
+      <div class="learn-page-main" style="overflow-y: auto"><div class="doc">长文档</div></div>
+      <div class="resources-list">${RESOURCE_CARDS([{ title: '文档任务点', state: '未完成', active: true }])}</div>`, LEARN_URL);
+    const scroller = window.document.querySelector('.learn-page-main');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 100000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 800, configurable: true });
+    let moves = 0;
+    let last = 0;
+    Object.defineProperty(scroller, 'scrollTop', {
+      get() { return last; },
+      set(v) { if (v !== last) { last = v; moves += 1; } },
+      configurable: true
+    });
+    await start(ctx, window);
+    await nextTick(ctx, window);
+    await nextTick(ctx, window);
+    check('K 图文资源在滚动阅读', moves > 0, 'moves=' + moves);
+    check('K 滚动步数受上限约束', vm.runInContext('__ticks.length', ctx) >= 1, 'ticks=' + vm.runInContext('__ticks.length', ctx));
     window.close();
   }
 
