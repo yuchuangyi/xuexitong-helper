@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         阿墨·网课助手
 // @namespace    amo.netcourse
-// @version      0.3.2
+// @version      0.3.3
 // @author       阿墨
 // @description  🖋 阿墨·网课助手 —— 全平台网课学习辅助。1、已适配超星学习通、知到智慧树（含新版 AI 课程知识学习页）、Unipus，更多平台持续适配中；2、视频自动播放 / 静音 / 倍速，任务点自动跳转；3、随堂练习、测验、作业自动答题，答案由 DeepSeek V4.1（deepseek-flash）生成；4、仅供学习交流使用，不收集手机号、学校信息等隐私内容。
 // @license      MIT
@@ -6245,7 +6245,30 @@
     return null;
   };
   const zsAiGetVideo = () => {
-    const videos = Array.from(document.querySelectorAll("video"));
+    // 视频播放器可能懒加载，也可能挂在同源 iframe 里，这里递归找
+    const collect = (doc, depth) => {
+      if (!doc || depth > 3) return [];
+      let found = [];
+      try {
+        found = Array.from(doc.querySelectorAll("video"));
+      } catch (error) {
+        found = [];
+      }
+      try {
+        Array.from(doc.querySelectorAll("iframe")).forEach((frame) => {
+          try {
+            const inner = frame.contentDocument;
+            if (inner) found = found.concat(collect(inner, depth + 1));
+          } catch (error) {
+            /* 跨域 iframe 读不到，忽略 */
+          }
+        });
+      } catch (error) {
+        /* ignore */
+      }
+      return found;
+    };
+    const videos = collect(document, 0);
     if (!videos.length) return null;
     const visible = videos.find((video) => {
       const rect = video.getBoundingClientRect();
@@ -6287,6 +6310,13 @@
       if (match && Number(match[1]) >= 99) return true;
     }
     return false;
+  };
+  // 视频类资源卡片的特征：文本里带时长（如 "课程视频…mp4 00:14:43 0%"）。
+  // ⚠️ 不能用 .video-wrap/.video-image 这类结构特征 —— 真机上 PPT/图文卡片的 DOM
+  // 里同样有这层包裹，用了会把所有资源都当成视频。
+  const zsAiIsVideoCard = (card) => {
+    if (!card) return false;
+    return /\d{1,2}:\d{2}:\d{2}/.test(zsAiPlain(card.textContent));
   };
   // "必学 2/4" -> { done: 2, total: 4 }
   const zsAiParseRequired = (text) => {
@@ -6805,8 +6835,12 @@
     const ZS_AI_MAX_SCROLL_STEPS = 400;
     // 点同一条资源要冷却：点了没反应还反复点，内容区会不停重载，看起来就像页面一直在刷新
     const ZS_AI_RESOURCE_CLICK_COOLDOWN_MS = 12000;
+    // 视频播放器是懒加载的，等不到 <video> 时最多等这么久
+    const ZS_AI_VIDEO_WAIT_SECONDS = 180;
     const resourceWait = { key: "", at: 0, steps: 0, stuck: 0 };
     const clickAttempt = { key: "", at: 0, times: 0 };
+    // 视频已经播完的资源（卡片文本可能还没变成 100%，避免被反复当成未完成）
+    let videoDoneKey = "";
     const skippedResources = /* @__PURE__ */ new Set();
     const zsAiCardKey = (card) => zsAiCompact(card && card.textContent).slice(0, 40);
     const zsAiCardIsActive = (card) => /(^|\s)active(\s|$)/.test(String((card && card.className) || ""));
@@ -6818,6 +6852,7 @@
         resourceWait.steps = 0;
         resourceWait.stuck = 0;
       }
+      const isVideoCard = zsAiIsVideoCard(card);
       const video = zsAiGetVideo();
       if (video) {
         try {
@@ -6838,6 +6873,8 @@
         const duration = Number(video.duration);
         const finished = video.ended || (Number.isFinite(duration) && duration > 0 && video.currentTime >= duration - 1.5);
         if (finished) {
+          // 视频播完了，但卡片文本可能还停在 97% 之类，这里记下来避免被当成「未完成」反复处理
+          videoDoneKey = zsAiCardKey(card);
           if (Date.now() - lastVideoLogAt > 20000) {
             lastVideoLogAt = Date.now();
             logStore.addLog("当前视频已播放完成，等待平台结算进度", "success");
@@ -6846,6 +6883,23 @@
           lastVideoLogAt = Date.now();
           const percent = Number.isFinite(duration) && duration > 0 ? Math.round((video.currentTime / duration) * 100) : 0;
           logStore.addLog(`视频播放中：${percent}%${video.paused ? "（已暂停，尝试续播）" : ""}`, "primary");
+        }
+        return;
+      }
+      // 视频资源但页面里还没有 <video>：播放器是懒加载的，必须等它挂载。
+      // 这里绝不能套用图文的超时把它跳过，否则视频任务点永远跳不过去。
+      if (isVideoCard) {
+        const waited = Math.round((Date.now() - resourceWait.at) / 1000);
+        if (Date.now() - lastVideoLogAt > 15000) {
+          lastVideoLogAt = Date.now();
+          logStore.addLog(`视频播放器加载中（已等待 ${waited}s）`, "warning");
+        }
+        zsAiScrollIframes();
+        if (waited > ZS_AI_VIDEO_WAIT_SECONDS) {
+          skippedResources.add(zsAiCardKey(card));
+          logStore.addLog(`视频播放器 ${ZS_AI_VIDEO_WAIT_SECONDS}s 仍未出现，先跳过该资源`, "danger");
+          resourceWait.key = "";
+          advanceLearnTask(true);
         }
         return;
       }
@@ -6946,6 +7000,7 @@
       logStore.addLog(`本知识点必学资源已完成，切换到下一个知识点：${name}`, "success");
       resourceWait.key = "";
       skippedResources.clear();
+      videoDoneKey = "";
       return true;
     };
 
@@ -6990,7 +7045,7 @@
         }
         const cards = zsAiGetResourceCards().filter((card) => zsAiIsVisible(card));
         const current = cards.find((card) => /(^|\s)active(\s|$)/.test(String(card.className || "")));
-        if (current && !zsAiCardFinished(current)) {
+        if (current && !zsAiCardFinished(current) && zsAiCardKey(current) !== videoDoneKey) {
           studyCurrentResource(current);
           return;
         }

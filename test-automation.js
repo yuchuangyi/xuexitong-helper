@@ -410,6 +410,46 @@ function lastLogs(ctx, count) {
     window.close();
   }
 
+  // L. 视频卡片但播放器还没挂载（页面里没有 <video>）→ 必须等待，不能按图文的 150s 超时跳过
+  {
+    const { window, ctx } = await boot(`
+      ${STUDY_POINTS([{ name: '甲知识点', done: 0, total: 3, active: true }])}
+      <div class="resources-list">${RESOURCE_CARDS([
+        { title: '课程视频专题4：世界是普遍联系的吗.mp4', state: '00:14:43 0%', active: true },
+        { title: '课件专题4', state: '未完成' }
+      ])}</div>`, LEARN_URL);
+    await start(ctx, window);
+    vm.runInContext('__advanceClock(160000)', ctx);
+    await nextTick(ctx, window);
+    const logsMid = lastLogs(ctx, 6);
+    check('L 视频资源不会按图文的 150s 超时被跳过', !/仍未标记完成/.test(logsMid), logsMid);
+    check('L 会等待视频播放器挂载', /视频播放器加载中/.test(logsMid), logsMid);
+    vm.runInContext('__advanceClock(40000)', ctx);
+    await nextTick(ctx, window);
+    check('L 超过 180s 才放弃并给出告警', /仍未出现/.test(lastLogs(ctx, 5)), lastLogs(ctx, 5));
+    window.close();
+  }
+
+  // M. 视频播完（ended）但卡片文本还没变 100% → 也要能推进到下一个资源
+  {
+    const { window, ctx } = await boot(`
+      ${STUDY_POINTS([{ name: '甲知识点', done: 0, total: 2, active: true }])}
+      <video class="study-video"></video>
+      <div class="resources-list">${RESOURCE_CARDS([
+        { title: '课程视频专题4.mp4', state: '00:14:43 0%', active: true },
+        { title: '课件专题4', state: '未完成' }
+      ])}</div>`, LEARN_URL);
+    const video = window.document.querySelector('video');
+    Object.defineProperty(video, 'ended', { value: true, configurable: true });
+    await start(ctx, window);
+    await nextTick(ctx, window);
+    check('M 视频播完自动推进到下一个资源', clicks(window, '课件专题4') > 0,
+      'clicks=' + clicks(window, '课件专题4') + ' | ' + lastLogs(ctx, 3));
+    check('M 已播完的视频不会被反复点击', clicks(window, '课程视频专题4.mp4') === 0,
+      'clicks=' + clicks(window, '课程视频专题4.mp4'));
+    window.close();
+  }
+
   let failed = 0;
   for (const item of results) {
     if (!item.ok) failed += 1;
