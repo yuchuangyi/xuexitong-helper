@@ -84,6 +84,42 @@ const outCustom = ctx.migrateConfig(customModel, cfgWithModel);
 check('自定义模型不被覆盖', outCustom.deepseek.model === 'my-custom-model', 'model=' + outCustom.deepseek.model);
 check('自定义 baseUrl 不被覆盖', outCustom.deepseek.baseUrl === 'https://my-proxy.local');
 
+// ---- 智慧树视频倍速：旧默认 1 -> 新默认 1.5（0.3.5 起自动 1.5 倍速） ----
+const cfgWithRate = JSON.parse(JSON.stringify(defaultConfig));
+cfgWithRate.platformParams.zhsAi = {
+  name: '智慧树AI课程助手',
+  parts: [
+    { name: '学习设置', params: [
+      { name: '自动播放并静音视频', value: true, type: 'boolean' },
+      { name: '学完自动下一个任务点', value: true, type: 'boolean' },
+      { name: '视频倍速', value: 1.5, type: 'number' }
+    ] },
+    { name: '答题设置', params: [] }
+  ]
+};
+const oldRateUser = JSON.parse(JSON.stringify(stored));
+oldRateUser.platformParams.zhsAi = { name: '智慧树AI课程助手', parts: [
+  { name: '学习设置', params: [
+    { name: '自动播放并静音视频', value: true, type: 'boolean' },
+    { name: '学完自动下一个任务点', value: true, type: 'boolean' },
+    { name: '视频倍速', value: 1, type: 'number' }
+  ] }
+] };
+const outOldRate = ctx.migrateConfig(oldRateUser, cfgWithRate);
+check('旧倍速 1 升级为 1.5（自动倍速）', outOldRate.platformParams.zhsAi.parts[0].params[2].value === 1.5,
+  'value=' + outOldRate.platformParams.zhsAi.parts[0].params[2].value);
+const customRate = JSON.parse(JSON.stringify(stored));
+customRate.platformParams.zhsAi = { name: '智慧树AI课程助手', parts: [
+  { name: '学习设置', params: [
+    { name: '自动播放并静音视频', value: true, type: 'boolean' },
+    { name: '学完自动下一个任务点', value: true, type: 'boolean' },
+    { name: '视频倍速', value: 2, type: 'number' }
+  ] }
+] };
+const outCustomRate = ctx.migrateConfig(customRate, cfgWithRate);
+check('用户自己设的倍速 2 不被覆盖', outCustomRate.platformParams.zhsAi.parts[0].params[2].value === 2,
+  'value=' + outCustomRate.platformParams.zhsAi.parts[0].params[2].value);
+
 const freshUser = ctx.migrateConfig({ version: '0.2.4' }, cfgWithModel);
 check('全新用户拿到 deepseek-flash 默认值', freshUser.deepseek.model === 'deepseek-flash', 'model=' + freshUser.deepseek.model);
 

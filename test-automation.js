@@ -60,7 +60,7 @@ var __config = {
   platformParams: {
     zhsAi: {
       parts: [
-        { params: [{ value: true }, { value: true }, { value: 1 }, { value: 150 }] },
+        { params: [{ value: true }, { value: true }, { value: 1.5 }, { value: 150 }] },
         { params: [{ value: true }, { value: true }] }
       ]
     }
@@ -224,7 +224,7 @@ function lastLogs(ctx, count) {
     await start(ctx, window);
     check('A 视频自动播放', video.__played === true);
     check('A 视频自动静音', video.muted === true);
-    check('A 视频倍速按设置生效', video.playbackRate === 1, 'rate=' + video.playbackRate);
+    check('A 视频倍速按设置生效（自动 1.5 倍）', video.playbackRate === 1.5, 'rate=' + video.playbackRate);
     check('A 视频播放中不误点资源卡片', clicks(window, 'basic-info-video-card') === 0, 'clicks=' + clicks(window, 'basic-info-video-card'));
     check('A 路由识别为学习页', /学习页/.test(lastLogs(ctx, 4)), lastLogs(ctx, 4));
     window.close();

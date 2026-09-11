@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         阿墨·网课助手
 // @namespace    amo.netcourse
-// @version      0.3.4
+// @version      0.3.5
 // @author       阿墨
 // @description  🖋 阿墨·网课助手 —— 全平台网课学习辅助。1、已适配超星学习通、知到智慧树（含新版 AI 课程知识学习页）、Unipus，更多平台持续适配中；2、视频自动播放 / 静音 / 倍速，任务点自动跳转；3、随堂练习、测验、作业自动答题，答案由 DeepSeek V4.1（deepseek-flash）生成；4、仅供学习交流使用，不收集手机号、学校信息等隐私内容。
 // @license      MIT
@@ -154,6 +154,8 @@
     }
     return storedValue === void 0 ? cloneLatestValue(latestValue) : storedValue;
   };
+  // 智慧树视频倍速的旧默认值是 1，0.3.5 起改为 1.5（自动 1.5 倍速）
+  const ZS_AI_LEGACY_VIDEO_RATE = 1;
   const LEGACY_DEEPSEEK_MODELS = [
     "deepseek-chat",
     "deepseek-reasoner",
@@ -171,6 +173,18 @@
     const storedModel = mergedConfig.deepseek && mergedConfig.deepseek.model;
     if (latestModel && LEGACY_DEEPSEEK_MODELS.includes(storedModel)) {
       mergedConfig.deepseek.model = latestModel;
+    }
+    // 智慧树视频倍速：旧默认 1 -> 新默认 1.5。只升级旧默认值，
+    // 用户自己设过其它倍速（2、16、0.5…）不动。
+    const latestPlatform = defaultConfig.platformParams && defaultConfig.platformParams.zhsAi;
+    const mergedPlatform = mergedConfig.platformParams && mergedConfig.platformParams.zhsAi;
+    if (latestPlatform && mergedPlatform && Array.isArray(mergedPlatform.parts) && mergedPlatform.parts[0] && Array.isArray(mergedPlatform.parts[0].params)) {
+      const byName = (params, name) => (params || []).find((param) => param && param.name === name);
+      const latestRate = byName(latestPlatform.parts[0].params, "视频倍速");
+      const storedRate = byName(mergedPlatform.parts[0].params, "视频倍速");
+      if (latestRate && storedRate && Number(storedRate.value) === ZS_AI_LEGACY_VIDEO_RATE) {
+        storedRate.value = latestRate.value;
+      }
     }
     return mergedConfig;
   };
@@ -286,7 +300,7 @@
                 },
                 {
                   name: "视频倍速",
-                  value: 1,
+                  value: 1.5,
                   type: "number",
                   min: 1,
                   max: 16,
