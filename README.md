@@ -304,4 +304,4 @@ xuexitong-helper/
 
 ## 📄 License
 
-[MIT](./LICENSE) © 阿墨（王楠） · 基于 isMobile 原作二次开发
+[MIT](./LICENSE) © 羽川翼（阿墨） · 基于 isMobile 原作二次开发
