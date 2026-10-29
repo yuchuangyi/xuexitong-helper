@@ -5,7 +5,8 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const DIR = 'C:\\Users\\wangn\\WorkBuddy\\2026-09-11-10-00-35';
+// 脚本路径跟随仓库位置，换机器/换目录不用改代码
+const DIR = path.join(__dirname, '..');
 const SCRIPT = path.join(DIR, fs.readdirSync(DIR).find((name) => name.endsWith('.user.js')));
 const src = fs.readFileSync(SCRIPT, 'utf8');
 
@@ -69,6 +70,7 @@ var __config = {
 var useConfigStore = () => __config;
 var getAnswer = async () => {
   aiCallCount += 1;
+  if (window.__answerQueue && window.__answerQueue.length) return window.__answerQueue.shift();
   return window.__cannedAnswer || { code: 200, data: { answer: ["B. 球体"] } };
 };
 var __logs = () => logs;
@@ -303,6 +305,70 @@ function lastLogs(ctx, count) {
     check('E 有题目时调用了 AI 答题', asked === 1, 'asked=' + asked + ' | ' + lastLogs(ctx, 3));
     check('E 选中了 AI 给的答案', checkedIndex === 1, 'checkedIndex=' + checkedIndex);
     check('E 答题后点了下一题', clicks(window, 'next-topic') > 0, 'clicks=' + clicks(window, 'next-topic'));
+    window.close();
+  }
+
+  /* ============ 答题失败重试（0.3.6） ============ */
+  // 旧版一失败就把题记进 answeredKeys，等于永久放弃；网络抖动一次这道题就废了。
+  // 新版：20s 冷却后可重试，最多 3 次。
+
+  const RETRY_PAGE = `
+      ${STUDY_POINTS([{ name: '甲知识点', done: 0, total: 1, active: true }])}
+      <video class="study-video"></video>
+      <div class="resources-list">${RESOURCE_CARDS([{ title: '甲资源', state: '0%', active: true }])}</div>
+      ${QUESTION_BLOCK}`;
+
+  // N. 失败 → 冷却期内不重复请求 → 冷却结束后重试成功
+  {
+    const { window, ctx } = await boot(RETRY_PAGE, LEARN_URL);
+    window.__answerQueue = [
+      { code: 10003, data: { answer: [] }, msg: '网络请求失败' },
+      { code: 200, data: { answer: ['B. 球体'] } }
+    ];
+    await start(ctx, window);
+    await wait(window, 150);
+    const askedFirst = vm.runInContext('aiCallCount', ctx);
+    check('N 首次答题失败调用了 1 次 API', askedFirst === 1, 'asked=' + askedFirst + ' | ' + lastLogs(ctx, 2));
+    check('N 失败日志带重试次数', /第 1\/3 次/.test(lastLogs(ctx, 3)), lastLogs(ctx, 3));
+
+    await nextTick(ctx, window);
+    await wait(window, 120);
+    const askedCooldown = vm.runInContext('aiCallCount', ctx);
+    check('N 冷却期内不重复请求', askedCooldown === 1, 'asked=' + askedCooldown);
+
+    vm.runInContext('__advanceClock(21000)', ctx);
+    await nextTick(ctx, window);
+    await wait(window, 200);
+    const askedRetry = vm.runInContext('aiCallCount', ctx);
+    check('N 冷却结束后自动重试', askedRetry === 2, 'asked=' + askedRetry + ' | ' + lastLogs(ctx, 2));
+    const labels = Array.from(window.document.querySelectorAll('label.el-radio'));
+    const checkedIndex = labels.findIndex((l) => l.querySelector('input').checked);
+    check('N 重试成功后填入了答案', checkedIndex === 1, 'checkedIndex=' + checkedIndex);
+    window.close();
+  }
+
+  // O. 连续失败 3 次后停止重试，不再白烧 token
+  {
+    const { window, ctx } = await boot(RETRY_PAGE, LEARN_URL);
+    const fail = () => ({ code: 10003, data: { answer: [] }, msg: '网络请求失败' });
+    window.__answerQueue = [fail(), fail(), fail(), fail(), fail()];
+    await start(ctx, window);
+    await wait(window, 150);
+
+    for (let round = 0; round < 2; round += 1) {
+      vm.runInContext('__advanceClock(21000)', ctx);
+      await nextTick(ctx, window);
+      await wait(window, 150);
+    }
+    const afterThird = vm.runInContext('aiCallCount', ctx);
+    check('O 三次失败共请求 3 次', afterThird === 3, 'asked=' + afterThird + ' | ' + lastLogs(ctx, 2));
+    check('O 第三次失败提示停止重试', /已停止自动重试/.test(lastLogs(ctx, 4)), lastLogs(ctx, 4));
+
+    vm.runInContext('__advanceClock(21000)', ctx);
+    await nextTick(ctx, window);
+    await wait(window, 150);
+    const afterFourth = vm.runInContext('aiCallCount', ctx);
+    check('O 超过上限后不再请求 API', afterFourth === 3, 'asked=' + afterFourth);
     window.close();
   }
 

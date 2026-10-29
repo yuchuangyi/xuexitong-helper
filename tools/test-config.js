@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const DIR = 'C:\\Users\\wangn\\WorkBuddy\\2026-09-11-10-00-35';
+const DIR = path.join(__dirname, '..');
 const SCRIPT = path.join(DIR, fs.readdirSync(DIR).find((name) => name.endsWith('.user.js')));
 const src = fs.readFileSync(SCRIPT, 'utf8');
 
@@ -122,6 +122,34 @@ check('用户自己设的倍速 2 不被覆盖', outCustomRate.platformParams.zh
 
 const freshUser = ctx.migrateConfig({ version: '0.2.4' }, cfgWithModel);
 check('全新用户拿到 deepseek-flash 默认值', freshUser.deepseek.model === 'deepseek-flash', 'model=' + freshUser.deepseek.model);
+
+// ---- 0.3.6：设置项改名「正确率达到多少自动提交」→「AI 作答率达标才自动提交」 ----
+// mergeArrayByLatestFields 是按 name 匹配的，改名等于旧键丢失、值回落默认，
+// 所以 migrateConfig 里必须显式搬一次，否则老用户阈值会被重置成 85。
+const cfgRateRename = {
+  version: SCRIPT_VERSION,
+  otherParams: { name: '其他参数', params: [
+    { name: '切换、答题间隔，单位秒', value: 3, type: 'number' },
+    { name: 'AI 作答率达标才自动提交', value: 85, type: 'number' },
+    { name: '答案相似度超过多少选择', value: 85, type: 'number' }
+  ] }
+};
+const storedRateRename = {
+  version: '0.3.5',
+  otherParams: { name: '其他参数', params: [
+    { name: '切换、答题间隔，单位秒', value: 8, type: 'number' },
+    { name: '正确率达到多少自动提交', value: 60, type: 'number' },
+    { name: '答案相似度超过多少选择', value: 70, type: 'number' }
+  ] }
+};
+const outRateRename = ctx.migrateConfig(storedRateRename, cfgRateRename);
+const byNameOut = (config, name) => (config.otherParams.params.find((param) => param.name === name) || {}).value;
+check('设置项改名后老用户阈值被搬过来', byNameOut(outRateRename, 'AI 作答率达标才自动提交') === 60,
+  'value=' + byNameOut(outRateRename, 'AI 作答率达标才自动提交'));
+check('改名不影响相邻设置项', byNameOut(outRateRename, '答案相似度超过多少选择') === 70,
+  'value=' + byNameOut(outRateRename, '答案相似度超过多少选择'));
+check('改名后旧键不会残留在配置里', outRateRename.otherParams.params.some((param) => param.name === '正确率达到多少自动提交') === false);
+check('全新用户拿到 AI 作答率默认值', byNameOut(ctx.migrateConfig({ version: '0.2.4' }, cfgRateRename), 'AI 作答率达标才自动提交') === 85);
 
 let failed = 0;
 for (const item of results) {

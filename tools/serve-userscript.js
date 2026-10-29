@@ -4,7 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
-const ROOT = 'C:\\Users\\wangn\\WorkBuddy\\2026-09-11-10-00-35';
+const ROOT = path.join(__dirname, '..');
 const PORT = 18234;
 const LIFETIME_MS = 20 * 60 * 1000;
 const LOG = path.join(ROOT, 'serve-userscript.log');

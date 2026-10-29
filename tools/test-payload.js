@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const DIR = 'C:\\Users\\wangn\\WorkBuddy\\2026-09-11-10-00-35';
+const DIR = path.join(__dirname, '..');
 const SCRIPT = path.join(DIR, fs.readdirSync(DIR).find((name) => name.endsWith('.user.js')));
 const src = fs.readFileSync(SCRIPT, 'utf8');
 

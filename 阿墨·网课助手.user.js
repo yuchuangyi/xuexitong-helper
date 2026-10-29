@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         阿墨·网课助手
 // @namespace    amo.netcourse
-// @version      0.3.5
+// @version      0.3.6
+// @updateURL    https://raw.githubusercontent.com/yuchuangyi/xuexitong-helper/main/%E9%98%BF%E5%A2%A8%C2%B7%E7%BD%91%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
+// @downloadURL  https://raw.githubusercontent.com/yuchuangyi/xuexitong-helper/main/%E9%98%BF%E5%A2%A8%C2%B7%E7%BD%91%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
 // @author       阿墨
 // @description  🖋 阿墨·网课助手 —— 全平台网课学习辅助。1、已适配超星学习通、知到智慧树（含新版 AI 课程知识学习页）、Unipus，更多平台持续适配中；2、视频自动播放 / 静音 / 倍速，任务点自动跳转；3、随堂练习、测验、作业自动答题，答案由 DeepSeek V4.1（deepseek-flash）生成；4、仅供学习交流使用，不收集手机号、学校信息等隐私内容。
 // @license      MIT
@@ -186,6 +188,18 @@
         storedRate.value = latestRate.value;
       }
     }
+    // 「正确率达到多少自动提交」这个名字有误导：脚本拿不到平台判分结果，
+    // 实际统计的是「AI 作答覆盖率」。改名后老用户按旧名存的值会被 mergeArrayByLatestFields
+    // 当成缺失而回落默认值，所以这里必须显式搬一次。
+    const LEGACY_ANSWER_RATE_NAME = "正确率达到多少自动提交";
+    const ANSWER_RATE_NAME = "AI 作答率达标才自动提交";
+    const storedOtherParams = (storedConfig && storedConfig.otherParams && storedConfig.otherParams.params) || [];
+    const mergedOtherParams = (mergedConfig.otherParams && mergedConfig.otherParams.params) || [];
+    const legacyRateParam = storedOtherParams.find((param) => param && param.name === LEGACY_ANSWER_RATE_NAME);
+    const answerRateParam = mergedOtherParams.find((param) => param && param.name === ANSWER_RATE_NAME);
+    if (legacyRateParam && answerRateParam && legacyRateParam.value !== void 0 && legacyRateParam.value !== null) {
+      answerRateParam.value = legacyRateParam.value;
+    }
     return mergedConfig;
   };
   const getLocalStorageConfig = () => {
@@ -369,9 +383,12 @@
               type: "number"
             },
             {
-              name: "正确率达到多少自动提交",
+              name: "AI 作答率达标才自动提交",
               value: 85,
-              type: "number"
+              type: "number",
+              min: 0,
+              max: 100,
+              step: 1
             },
             {
               name: "答案相似度超过多少选择",
@@ -420,6 +437,25 @@
     let now = /* @__PURE__ */ new Date();
     return formatDateTime(now);
   };
+  // 日志列表上限：刷课是长时间挂着跑的，不裁剪的话数组会无限增长，
+  // Vue 响应式代理 + 列表渲染会越来越卡，最后整个面板卡死。
+  const LOG_LIST_MAX = 400;
+  // 日志里唯一允许的 HTML 片段（脚本自己生成的跳转链接）。
+  // 其余内容一律转义 —— 题目文本、资源标题都来自平台页面，
+  // 直接 innerHTML 渲染等于把 DOM 注入面开到课程页面里。
+  const LOG_LINK_HTML = '<a class="log-action-link" href="#" data-log-action="show-answer-tab">点击查看原因</a>';
+  const escapeLogHtml = (text) => String(text).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[ch]);
+  const sanitizeLogHtml = (message) => {
+    const text = message == null ? "" : String(message);
+    if (text.indexOf(LOG_LINK_HTML) === -1) return escapeLogHtml(text);
+    return text.split(LOG_LINK_HTML).map(escapeLogHtml).join(LOG_LINK_HTML);
+  };
   const useLogStore = pinia.defineStore("logStore", {
     state: () => ({
       logList: []
@@ -432,6 +468,12 @@
           type
         };
         this.logList.push(log);
+        if (this.logList.length > LOG_LIST_MAX) {
+          this.logList.splice(0, this.logList.length - LOG_LIST_MAX);
+        }
+      },
+      clearLog() {
+        this.logList = [];
       }
     }
   });
@@ -584,17 +626,44 @@
       });
     });
   };
+  // 同一道题（题干 + 选项完全一致）不重复烧 token。
+  // 章节作业里同一题库的题反复出现很常见，缓存只在本次会话内有效，不落盘。
+  const ANSWER_CACHE_MAX = 300;
+  const answerCache = /* @__PURE__ */ new Map();
+  const buildAnswerCacheKey = (question) => {
+    const title = String(question && question.title || "").replace(/\s+/g, " ").trim();
+    const optionList = question && question.optionsText
+      ? Array.isArray(question.optionsText) ? question.optionsText : Object.values(question.optionsText)
+      : [];
+    const raw = title + "##" + optionList.map((item) => String(item).replace(/\s+/g, " ").trim()).join("|");
+    return typeof md5 === "function" ? md5(raw) : raw;
+  };
   const getAnswer = async (question) => {
     const configStore = useConfigStore();
     const { apiKey, model, baseUrl } = configStore.deepseek;
     if (!apiKey) {
       return handleError("请先填写 DeepSeek API Key");
     }
+    const cacheKey = buildAnswerCacheKey(question);
+    if (cacheKey && answerCache.has(cacheKey)) {
+      return {
+        code: 200,
+        data: { answer: answerCache.get(cacheKey).slice(), num: "", usenum: "", cached: true },
+        msg: ""
+      };
+    }
     await sleep(configStore.otherParams.params[0].value);
     let result = await callDeepseekAPI(apiKey, baseUrl, model, question);
-    if (result.code === 10003 && result.errorType === "rate_limit") {
-      await sleep(2);
+    // 429 退避重试：2s → 6s。原来固定 2s 只重试一次，连续答题时很容易继续撞限流
+    for (let attempt = 0; attempt < 2 && result.code === 10003 && result.errorType === "rate_limit"; attempt += 1) {
+      await sleep(attempt === 0 ? 2 : 6);
       result = await callDeepseekAPI(apiKey, baseUrl, model, question);
+    }
+    if (result.code === 200) {
+      if (answerCache.size >= ANSWER_CACHE_MAX) {
+        answerCache.delete(answerCache.keys().next().value);
+      }
+      answerCache.set(cacheKey, result.data.answer.slice());
     }
     return result;
   };
@@ -645,7 +714,7 @@
                   vue.createVNode(_component_el_text, {
                     type: item.type ? item.type : "primary",
                     size: "small",
-                    innerHTML: item.message
+                    innerHTML: sanitizeLogHtml(item.message)
                   }, null, 8, ["type", "innerHTML"]),
                   vue.createVNode(_component_el_divider, {
                     class: "log-divider",
@@ -5405,18 +5474,27 @@
             if (answerData.code === 200) {
               question.answer = answerData.data.answer;
               this.fillQuestion(question);
-              this.addLog(`第${index + 1}道题搜索成功`, "success");
-              this.addLog(`剩余次数:${answerData.data.num}`, "primary");
+              if (answerData.data.cached) {
+                this.addLog(`第${index + 1}道题命中缓存`, "success");
+              } else {
+                this.addLog(`第${index + 1}道题搜索成功`, "success");
+                this.addLog(`剩余次数:${answerData.data.num}`, "primary");
+              }
               this.correctNum += 1;
             } else {
-              this.addLog(`第${index + 1}道题搜索失败，<a class="log-action-link" href="#" data-log-action="show-answer-tab">点击查看原因</a>`, "danger");
+              this.addLog(`第${index + 1}道题搜索失败，${LOG_LINK_HTML}`, "danger");
               question.answer[0] = answerData.msg;
             }
             this.addQuestion(question);
           }
         } else
           this.addLog("未解析到题目，请进入正确页面", "danger");
-        return this.questions.length ? this.correctNum / this.questions.length * 100 : 0;
+        const total = this.questions.length;
+        return {
+          total,
+          answered: this.correctNum,
+          rate: total ? this.correctNum / total * 100 : 0
+        };
       });
       __publicField(this, "parseHtml", () => {
         if (!this._document)
@@ -5588,9 +5666,19 @@
       }, 2e3);
     };
     let currentWatchIframeTaskId = 0;
+    // 旧订阅不取消的话，URL 每变化一次就多挂一组监听，长时间刷课会持续堆积
+    let currentWatchSubscription = null;
     const watchIframe = (documentElement) => {
       const thisTaskId = ++currentWatchIframeTaskId;
-      IframeUtils.getAllNestedIframes(documentElement).subscribe((allIframes) => {
+      if (currentWatchSubscription) {
+        try {
+          currentWatchSubscription.unsubscribe();
+        } catch (error) {
+          /* ignore */
+        }
+        currentWatchSubscription = null;
+      }
+      currentWatchSubscription = IframeUtils.getAllNestedIframes(documentElement).subscribe((allIframes) => {
         console.log(allIframes);
         rxjs.from(allIframes).pipe(concatMap((iframe) => {
           if (thisTaskId !== currentWatchIframeTaskId)
@@ -5628,32 +5716,97 @@
         });
       });
     };
+    // ⚠️ 媒体任务点必须有兜底出口。
+    // 旧实现只等 <video>/<audio> 出现，元素不来就永久轮询：Promise 永不 resolve →
+    // concatMap 队列卡死 → 后面的任务点全部不处理、也不跳章节，页面看起来「卡住不动」。
+    // 现在三条出口必居其一：播放完成 / 播放器超时未挂载 / 进度停滞超限。
+    const CX_MEDIA_TICK_MS = 2500;
+    const CX_MEDIA_ELEMENT_WAIT_MS = 90000;
+    const CX_MEDIA_STALL_LIMIT = 24;
     const processMedia = async (mediaType, iframeDocument) => {
       return new Promise((resolve) => {
+        let settled = false;
+        let intervalId = null;
+        let isExecuted = false;
+        let lastTime = -1;
+        let stallCount = 0;
+        let lastResumeAt = 0;
+        const startedAt = Date.now();
+        const finish = (message, type) => {
+          if (settled) return;
+          settled = true;
+          if (intervalId) clearInterval(intervalId);
+          if (message) logStore.addLog(message, type || "primary");
+          resolve();
+        };
         logStore.addLog(`发现一个${mediaType}，正在解析`, "warning");
         logStore.addLog(`正在尝试播放${mediaType}，请稍等5s`, "primary");
-        let isExecuted = false;
-        logStore.addLog("播放成功", "success");
-        const intervalId = setInterval(async () => {
-          const mediaElement = iframeDocument.documentElement.querySelector(mediaType);
-          if (mediaElement && !isExecuted) {
-            await mediaElement.pause();
-            mediaElement.muted = true;
-            await mediaElement.play();
-            const listener = async () => {
-              await sleep(configStore.otherParams.params[0].value);
-              await mediaElement.play();
-            };
-            mediaElement.addEventListener("pause", listener);
-            mediaElement.addEventListener("ended", () => {
-              logStore.addLog(`${mediaType}已播放完成`, "success");
-              mediaElement.removeEventListener("pause", listener);
-              resolve();
-            });
-            isExecuted = true;
-            clearInterval(intervalId);
+        intervalId = setInterval(async () => {
+          if (settled) return;
+          try {
+            const mediaElement = iframeDocument.documentElement.querySelector(mediaType);
+            if (!mediaElement) {
+              if (Date.now() - startedAt > CX_MEDIA_ELEMENT_WAIT_MS) {
+                finish(`${mediaType}播放器 ${Math.round(CX_MEDIA_ELEMENT_WAIT_MS / 1000)}s 内未出现，跳过该任务点（可刷新页面重试）`, "danger");
+              }
+              return;
+            }
+            if (!isExecuted) {
+              isExecuted = true;
+              try {
+                await mediaElement.pause();
+              } catch (error) {
+                /* 还没开始播放时 pause 可能抛错，忽略 */
+              }
+              mediaElement.muted = true;
+              try {
+                await mediaElement.play();
+                logStore.addLog(`${mediaType}播放成功`, "success");
+              } catch (error) {
+                logStore.addLog(`${mediaType} 自动播放被拒绝：${(error && error.message) || error}`, "warning");
+              }
+              const listener = () => {
+                sleep(configStore.otherParams.params[0].value).then(() => {
+                  if (settled || !mediaElement.paused) return;
+                  mediaElement.play().catch(() => {
+                    /* 交由停滞上限兜底 */
+                  });
+                });
+              };
+              mediaElement.addEventListener("pause", listener);
+              mediaElement.addEventListener("ended", () => {
+                mediaElement.removeEventListener("pause", listener);
+                finish(`${mediaType}已播放完成`, "success");
+              });
+              return;
+            }
+            const duration = Number(mediaElement.duration);
+            const current = Number(mediaElement.currentTime) || 0;
+            if (mediaElement.ended || (Number.isFinite(duration) && duration > 0 && current >= duration - 1)) {
+              finish(`${mediaType}已播放完成`, "success");
+              return;
+            }
+            if (Math.abs(current - lastTime) < 0.2) {
+              stallCount += 1;
+              if (mediaElement.paused && Date.now() - lastResumeAt > 3000) {
+                lastResumeAt = Date.now();
+                try {
+                  await mediaElement.play();
+                } catch (error) {
+                  /* 重试失败时由停滞上限兜底 */
+                }
+              }
+              if (stallCount >= CX_MEDIA_STALL_LIMIT) {
+                finish(`${mediaType}进度连续 ${Math.round(CX_MEDIA_STALL_LIMIT * CX_MEDIA_TICK_MS / 1000)}s 未推进，跳过该任务点（可刷新页面重试）`, "danger");
+              }
+            } else {
+              stallCount = 0;
+              lastTime = current;
+            }
+          } catch (error) {
+            finish(`处理${mediaType}任务点异常：${(error && error.message) || error}`, "danger");
           }
-        }, 2500);
+        }, CX_MEDIA_TICK_MS);
       });
     };
     const processWork = async (iframe, iframeDocument, iframeWindow) => {
@@ -5667,16 +5820,20 @@
         }
         decrypt(iframeDocument);
         logStore.addLog(`题目列表获取成功`, "primary");
-        const correctRate = await new CxQuestionHandler("zj", iframe).init();
+        const answerStat = await new CxQuestionHandler("zj", iframe).init();
         iframeWindow.alert = () => {
         };
+        const answerThreshold = Number(configStore.otherParams.params[1].value);
+        // ⚠️ 这里判的是「AI 作答覆盖率」，不是答对率 —— 脚本拿不到平台判分结果。
+        // 覆盖率不足说明有题没答出来，交上去大概率是空题，所以拦下来让自己补。
+        logStore.addLog(`AI 作答率 ${Math.round(answerStat.rate)}%（${answerStat.answered}/${answerStat.total} 题）`, "primary");
         if (configStore.platformParams.cx.parts[0].params[0].value) {
           logStore.addLog("自动提交已开启，尝试提交", "primary");
-          if (correctRate < Number(configStore.otherParams.params[1].value)) {
-            logStore.addLog(`正确率小于${configStore.otherParams.params[1].value}%，暂存`, "danger");
+          if (answerStat.rate < answerThreshold) {
+            logStore.addLog(`AI 作答率低于 ${answerThreshold}%，暂存不提交（可手动补答）`, "danger");
             await iframeWindow.noSubmit();
           } else {
-            logStore.addLog(`正确率大于${configStore.otherParams.params[1].value}%，提交`, "success");
+            logStore.addLog(`AI 作答率达到 ${answerThreshold}%，提交`, "success");
             await iframeWindow.btnBlueSubmit();
             await sleep(configStore.otherParams.params[0].value / 2);
             await iframeWindow.submitCheckTimes();
@@ -5691,21 +5848,46 @@
       });
     };
     const processPpt = async (iframeWindow) => {
-      const pptWindow = iframeWindow.document.querySelector("#panView").contentWindow;
       logStore.addLog("发现一个PPT，正在解析", "warning");
-      await pptWindow.scrollTo(
-        {
-          top: pptWindow.document.body.scrollHeight,
-          behavior: "smooth"
-        }
-      );
-      logStore.addLog("阅读完成", "success");
+      // #panView 是懒加载的，取不到时直接 TypeError；这里必须挡掉
+      let panView = null;
+      try {
+        panView = iframeWindow.document.querySelector("#panView");
+      } catch (error) {
+        panView = null;
+      }
+      if (!panView || !panView.contentWindow) {
+        logStore.addLog("PPT 阅读器未挂载，跳过该任务点（可刷新页面重试）", "warning");
+        return Promise.resolve();
+      }
+      try {
+        const pptWindow = panView.contentWindow;
+        await pptWindow.scrollTo(
+          {
+            top: pptWindow.document.body.scrollHeight,
+            behavior: "smooth"
+          }
+        );
+        logStore.addLog("阅读完成", "success");
+      } catch (error) {
+        logStore.addLog(`PPT 自动滚动失败：${(error && error.message) || error}`, "danger");
+      }
       return Promise.resolve();
     };
     const processBook = async (iframeWindow) => {
       logStore.addLog("发现一个电子书，正在解析", "warning");
-      _unsafeWindow.top.onchangepage(iframeWindow.getFrameAttr("end"));
-      logStore.addLog("阅读完成", "success");
+      // top.onchangepage 是平台挂的方法，改版后可能消失；取不到就别炸
+      try {
+        const topWindow = _unsafeWindow.top;
+        if (!topWindow || typeof topWindow.onchangepage !== "function") {
+          logStore.addLog("电子书翻页接口不可用，跳过该任务点（可刷新页面重试）", "warning");
+          return Promise.resolve();
+        }
+        topWindow.onchangepage(iframeWindow.getFrameAttr("end"));
+        logStore.addLog("阅读完成", "success");
+      } catch (error) {
+        logStore.addLog(`电子书翻页失败：${(error && error.message) || error}`, "danger");
+      }
       return Promise.resolve();
     };
     const runIframeDocumentTask = (iframeDocument, task) => {
@@ -5714,7 +5896,11 @@
       const runningTask = runningIframeDocumentTasks.get(iframeDocument);
       if (runningTask)
         return runningTask;
-      const taskPromise = Promise.resolve().then(task).then(() => {
+      // 任务抛异常时旧实现不会标记 processed → 同一个 iframe 被反复重试、日志刷屏。
+      // 这里吞掉异常并照常标记已完成，失败信息进日志，让队列继续往下走。
+      const taskPromise = Promise.resolve().then(task).catch((error) => {
+        logStore.addLog(`任务点处理失败：${(error && error.message) || error}`, "danger");
+      }).then(() => {
         processedIframeDocuments.add(iframeDocument);
       }).finally(() => {
         runningIframeDocumentTasks.delete(iframeDocument);
@@ -5722,13 +5908,27 @@
       runningIframeDocumentTasks.set(iframeDocument, taskPromise);
       return taskPromise;
     };
+    // 同样的问题：旧实现只等 readyState==='complete'，iframe 被拦 / 404 / 跨域时永久轮询。
+    // 超时后返回 false，由调用方决定跳过并记日志。
+    const CX_IFRAME_LOAD_TIMEOUT_MS = 30000;
     const waitIframeLoad = async (iframe) => {
       return new Promise((resolve) => {
-        const intervalId = setInterval(async () => {
-          var _a;
-          if (iframe.contentDocument && ((_a = iframe.contentDocument) == null ? void 0 : _a.readyState) == "complete") {
-            resolve();
+        const deadline = Date.now() + CX_IFRAME_LOAD_TIMEOUT_MS;
+        const intervalId = setInterval(() => {
+          let doc = null;
+          try {
+            doc = iframe.contentDocument;
+          } catch (error) {
+            doc = null;
+          }
+          if (doc && doc.readyState === "complete") {
             clearInterval(intervalId);
+            resolve(true);
+            return;
+          }
+          if (Date.now() > deadline) {
+            clearInterval(intervalId);
+            resolve(false);
           }
         }, 500);
       });
@@ -5764,22 +5964,32 @@
       return Promise.resolve();
     };
     const processIframe = async (iframe) => {
-      if (iframe.src.includes("javascript:"))
+      // 整体兜底：任何一步抛异常都不该让整个章节队列停摆
+      try {
+        if (iframe.src.includes("javascript:"))
+          return Promise.resolve();
+        if (!iframe.contentDocument || !iframe.contentWindow)
+          return Promise.resolve();
+        const loaded = await waitIframeLoad(iframe);
+        if (!loaded) {
+          logStore.addLog(`任务点 ${Math.round(CX_IFRAME_LOAD_TIMEOUT_MS / 1000)}s 内未加载完成，跳过它继续下一个`, "danger");
+          return Promise.resolve();
+        }
+        const iframeSrc = iframe.src;
+        const iframeDocument = iframe.contentDocument;
+        const iframeWindow = iframe.contentWindow;
+        if (!iframeDocument || !iframeWindow)
+          return Promise.resolve();
+        return await runIframeDocumentTask(iframeDocument, () => processIframeBody(
+          iframe,
+          iframeSrc,
+          iframeDocument,
+          iframeWindow
+        ));
+      } catch (error) {
+        logStore.addLog(`任务点处理异常：${(error && error.message) || error}`, "danger");
         return Promise.resolve();
-      if (!iframe.contentDocument || !iframe.contentWindow)
-        return Promise.resolve();
-      await waitIframeLoad(iframe);
-      const iframeSrc = iframe.src;
-      const iframeDocument = iframe.contentDocument;
-      const iframeWindow = iframe.contentWindow;
-      if (!iframeDocument || !iframeWindow)
-        return Promise.resolve();
-      return runIframeDocumentTask(iframeDocument, () => processIframeBody(
-        iframe,
-        iframeSrc,
-        iframeDocument,
-        iframeWindow
-      ));
+      }
     };
     init();
     processIframeTask();
@@ -6726,6 +6936,10 @@
     questionStore.clearQuestion();
     const handler = new ZhsAiQuestionHandler();
     const answeredKeys = /* @__PURE__ */ new Set();
+    // 答题失败重试策略：同一道题最多重试 3 次，两次之间至少隔 20s
+    const failedAnswers = /* @__PURE__ */ new Map();
+    const ANSWER_RETRY_LIMIT = 3;
+    const ANSWER_RETRY_COOLDOWN_MS = 20000;
     let busy = false;
     let keyWarned = false;
     let lastAdvanceAt = 0;
@@ -6791,20 +7005,32 @@
       if (!collected) return false;
       const key = questionKey(collected.snapshot);
       if (answeredKeys.has(key)) return false;
+      // 失败不再一棒子打死：网络抖动、限流重试后大概率能成。
+      // 但也不能无限重试白烧 token，所以按 key 记次数 + 冷却。
+      const failure = failedAnswers.get(key);
+      if (failure) {
+        if (failure.count >= ANSWER_RETRY_LIMIT) return true;
+        if (Date.now() - failure.at < ANSWER_RETRY_COOLDOWN_MS) return true;
+      }
       busy = true;
       try {
         logStore.addLog(`发现题目（${collected.snapshot.type}），正在请求 AI 答案`, "warning");
         const answerData = await getAnswer(collected.question);
         if (!answerData || answerData.code !== 200) {
           const message = (answerData && answerData.msg) || "未知错误";
-          logStore.addLog(`答题失败：${message}`, "danger");
+          const attempt = (failure ? failure.count : 0) + 1;
+          failedAnswers.set(key, { count: attempt, at: Date.now() });
+          const suffix = attempt >= ANSWER_RETRY_LIMIT
+            ? "，已停止自动重试，请手动作答"
+            : `（第 ${attempt}/${ANSWER_RETRY_LIMIT} 次，${Math.round(ANSWER_RETRY_COOLDOWN_MS / 1000)}s 后重试）`;
+          logStore.addLog(`答题失败：${message}${suffix}`, "danger");
           if (!keyWarned && String(message).indexOf("API Key") !== -1) {
             keyWarned = true;
             logStore.addLog("请到「答题」标签页填写 DeepSeek API Key 后刷新页面", "danger");
           }
-          answeredKeys.add(key);
           return true;
         }
+        failedAnswers.delete(key);
         collected.question.answer = answerData.data.answer || [];
         questionStore.addQuestion(collected.question);
         const picked = handler.applyAnswer(collected.snapshot, collected.question.answer);

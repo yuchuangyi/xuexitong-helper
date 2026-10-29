@@ -1,0 +1,14 @@
+{
+  "name": "xuexitong-helper",
+  "version": "0.3.6",
+  "private": true,
+  "description": "阿墨·网课助手 —— 学习通 / 智慧树 / Unipus 用户脚本的离线测试脚手架",
+  "scripts": {
+    "test": "node tools/run-tests.js",
+    "serve": "node tools/serve-userscript.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.3",
+    "rxjs": "^7.8.2"
+  }
+}

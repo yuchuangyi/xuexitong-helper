@@ -3,7 +3,7 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const ROOT = 'C:\\Users\\wangn\\WorkBuddy\\2026-09-11-10-00-35';
+const ROOT = path.join(__dirname, '..');
 const SCRIPT = path.join(ROOT, fs.readdirSync(ROOT).find((name) => name.endsWith('.user.js')));
 const src = fs.readFileSync(SCRIPT, 'utf8');
 
