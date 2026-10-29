@@ -89,21 +89,29 @@
 
 ### Step 2. 装脚本
 
-**方式 A：一键安装（推荐）**
+**方式 A：一键安装 · jsDelivr 源（国内推荐，不用翻墙）**
 
-点下面的链接，Tampermonkey 会自动弹出安装页，点「安装」即可：
+把下面这行完整复制到浏览器地址栏回车，Tampermonkey 会自动弹出安装页，点「安装」即可：
+
+```
+https://cdn.jsdelivr.net/gh/yuchuangyi/xuexitong-helper@main/%E9%98%BF%E5%A2%A8%C2%B7%E7%BD%91%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
+```
+
+**方式 B：一键安装 · GitHub 原链（需要能访问 GitHub）**
 
 ```
 https://raw.githubusercontent.com/yuchuangyi/xuexitong-helper/main/%E9%98%BF%E5%A2%A8%C2%B7%E7%BD%91%E8%AF%BE%E5%8A%A9%E6%89%8B.user.js
 ```
 
-**方式 B：手动导入**
+**方式 C：手动导入（以上都打不开时用这个，最稳）**
 
-1. 下载本仓库的 [`阿墨·网课助手.user.js`](./阿墨·网课助手.user.js)
+1. 打开 [仓库主页](https://github.com/yuchuangyi/xuexitong-helper)，下载 [`阿墨·网课助手.user.js`](./阿墨·网课助手.user.js) 到本地
 2. 打开 Tampermonkey 面板 → 「添加新脚本」
-3. 把文件内容全部粘贴进去，`Ctrl + S` 保存
+3. 删掉编辑器里的默认模板，把文件内容全部粘贴进去，`Ctrl + S` 保存
 
-安装完成后，打开任意受支持的网课页面，右下角会出现悬浮面板。
+安装完成后，打开任意受支持的网课页面，右上区域会出现悬浮面板。
+
+> 📌 **关于更新**：jsDelivr 源缓存约 12 小时，作者更新脚本后你可能不会立刻拿到新版。想立即更新就走方式 B，或者在 Tampermonkey 的脚本详情页手动点「检查更新」。
 
 ### Step 3. 配置 DeepSeek API Key（关键）
 
@@ -174,7 +182,16 @@ https://raw.githubusercontent.com/yuchuangyi/xuexitong-helper/main/%E9%98%BF%E5%
 ## ❓ 常见问题
 
 <details>
-<summary><b>装好了，但页面右下角没有面板？</b></summary>
+<summary><b>安装链接打不开 / 点了没反应？</b></summary>
+
+- **打不开**：国内访问 `raw.githubusercontent.com` 经常超时，换方式 A 的 jsDelivr 链接
+- **打开是一堆代码，没有弹出安装页**：说明 Tampermonkey 没接管这个链接。复制全部代码 → Tampermonkey 面板 →「添加新脚本」→ 粘贴覆盖 → `Ctrl + S`
+- **弹出安装页但按钮是灰色的**：点一下「编辑器」左边的「安装」标签页，或者先允许该域名
+- 装完记得在 Tampermonkey 的「管理面板」里确认「阿墨·网课助手」前面是**勾选状态**
+</details>
+
+<details>
+<summary><b>装好了，但页面上没有面板？</b></summary>
 
 按顺序排查：
 1. Tampermonkey 图标上的红色数字是否为 `1`，说明当前页有脚本在跑；点图标看「阿墨·网课助手」是否处于启用状态
